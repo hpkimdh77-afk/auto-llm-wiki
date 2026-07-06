@@ -148,6 +148,22 @@ def format_dtm_14(value):
     return value
 
 
+def extract_year(value) -> str:
+    """
+    사고일시(예: 2026-01-02 15:30:45)에서 연도 4자리를 추출.
+    형식이 안 맞으면 빈 문자열 반환.
+    """
+    if pd.isna(value):
+        return ""
+
+    value = str(value).strip()
+
+    if len(value) >= 4 and value[0:4].isdigit():
+        return value[0:4]
+
+    return ""
+
+
 def build_step_color_map(step_series: pd.Series) -> dict:
     """
     사고단계 코드 고유값마다 팔레트에서 색상을 하나씩 배정.
@@ -372,6 +388,34 @@ if df is not None:
     # -----------------------------------------------------
     st.subheader("조회 결과")
 
+    # -----------------------------------------------------
+    # 연도 선택 (사고일시 기준, 데이터에 있는 연도만 최신순으로 표시)
+    # -----------------------------------------------------
+    if "ACDT_GNRT_DTM" in df.columns:
+        year_series = df["ACDT_GNRT_DTM"].apply(extract_year)
+        year_options = sorted(
+            (y for y in year_series.unique() if y),
+            reverse=True,
+        )
+    else:
+        year_series = None
+        year_options = []
+
+    selected_year = "전체"
+
+    if year_options:
+        year_counts = year_series.value_counts()
+        year_labels = {
+            year: f"{year}년 ({year_counts.get(year, 0):,}건)"
+            for year in year_options
+        }
+        selected_year = st.radio(
+            "연도 선택 (사고일시 기준)",
+            options=["전체"] + year_options,
+            format_func=lambda y: f"전체 ({len(df):,}건)" if y == "전체" else year_labels[y],
+            horizontal=True,
+        )
+
     fcol1, fcol2, fcol3 = st.columns([1, 1, 2])
 
     with fcol1:
@@ -406,6 +450,9 @@ if df is not None:
 
     view_df = df
 
+    if selected_year != "전체" and year_series is not None:
+        view_df = view_df[year_series == selected_year]
+
     if dsrt_filter and "HDQT_DSRT_ID" in view_df.columns:
         view_df = view_df[view_df["HDQT_DSRT_ID"].isin(dsrt_filter)]
 
@@ -421,7 +468,8 @@ if df is not None:
             .str.contains(keyword, case=False, na=False)
         ]
 
-    st.caption(f"표시 중: **{len(view_df):,}건** / 전체 {len(df):,}건")
+    year_label = "전체 연도" if selected_year == "전체" else f"{selected_year}년"
+    st.caption(f"표시 중: **{year_label} {len(view_df):,}건** / 전체 {len(df):,}건")
 
     # -----------------------------------------------------
     # 사고단계 코드 색상 범례 + 테이블
@@ -454,13 +502,15 @@ if df is not None:
     csv_data = make_csv_bytes(view_df)
     excel_data = make_excel_bytes(view_df)
 
+    file_year = "all_years" if selected_year == "전체" else selected_year
+
     dcol1, dcol2 = st.columns(2)
 
     with dcol1:
         st.download_button(
             label="⬇️ CSV 다운로드",
             data=csv_data,
-            file_name="acdt_rept_all_years_h1_h2_h3_dsr.csv",
+            file_name=f"acdt_rept_{file_year}_h1_h2_h3_dsr.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -469,7 +519,7 @@ if df is not None:
         st.download_button(
             label="⬇️ 엑셀 다운로드",
             data=excel_data,
-            file_name="acdt_rept_all_years_h1_h2_h3_dsr.xlsx",
+            file_name=f"acdt_rept_{file_year}_h1_h2_h3_dsr.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )

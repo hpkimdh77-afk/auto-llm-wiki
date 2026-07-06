@@ -1,5 +1,6 @@
 import os
 import io
+import time
 import pandas as pd
 import streamlit as st
 import bigdataquery as bdq
@@ -223,20 +224,41 @@ def render_step_legend(color_map: dict):
     )
 
 
-@st.cache_data(ttl=60 * 10, show_spinner=False)
-def load_acdt_data(user_name: str) -> pd.DataFrame:
+def build_query_sql(query_year=None) -> str:
+    """조회 SQL 생성. query_year가 있으면 해당 연도만 조회."""
     select_clause = ",\n    ".join(SELECT_COLUMNS)
     dsrt_list_sql = "', '".join(TARGET_DSRT_IDS)
 
-    sql = f"""
+    year_condition = ""
+    if query_year:
+        # 원본 일시는 14자리 문자열(YYYYMMDDHHMISS)이라 연도 prefix로 필터
+        year_condition = f"\n  AND {DATE_COL} LIKE '{query_year}%'"
+
+    return f"""
 SELECT
     {select_clause}
 FROM {TABLE_NAME}
-WHERE UPPER(TRIM(HDQT_DSRT_ID)) IN ('{dsrt_list_sql}')
+WHERE UPPER(TRIM(HDQT_DSRT_ID)) IN ('{dsrt_list_sql}'){year_condition}
 ORDER BY {DATE_COL}
 """
 
-    df = bdq.getData(sql, user_name=user_name)
+
+@st.cache_data(ttl=60 * 10, show_spinner=False)
+def load_acdt_data(user_name: str, query_year=None) -> pd.DataFrame:
+    sql = build_query_sql(query_year)
+
+    # 502 같은 게이트웨이 일시 오류 대비 재시도 (2초 → 4초 백오프)
+    last_error = None
+    for attempt in range(3):
+        try:
+            df = bdq.getData(sql, user_name=user_name)
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    else:
+        raise last_error
 
     # bigdataquery 결과 컬럼이 소문자로 올 수 있어서 대문자로 통일
     df.columns = [str(col).upper() for col in df.columns]
@@ -311,6 +333,24 @@ st.sidebar.header("⚙️ 조회 설정")
 
 user_name = st.sidebar.text_input("SSO ID", value="dongrami.kim")
 
+query_scope = st.sidebar.radio(
+    "조회 범위",
+    options=["전체 연도", "특정 연도만"],
+    help="502 등 시간 초과 오류가 나면 특정 연도만 조회해서 부하를 줄여보세요.",
+)
+
+query_year = None
+if query_scope == "특정 연도만":
+    query_year = str(
+        st.sidebar.number_input(
+            "조회 연도",
+            min_value=2000,
+            max_value=2100,
+            value=2026,
+            step=1,
+        )
+    )
+
 st.sidebar.divider()
 
 with st.sidebar.expander("📋 조회 테이블 / 조건", expanded=False):
@@ -325,16 +365,7 @@ with st.sidebar.expander("📋 조회 테이블 / 조건", expanded=False):
 show_sql = st.sidebar.checkbox("SQL 보기", value=False)
 
 if show_sql:
-    st.sidebar.code(
-        f"""
-SELECT
-    {", ".join(SELECT_COLUMNS)}
-FROM {TABLE_NAME}
-WHERE UPPER(TRIM(HDQT_DSRT_ID)) IN ('H1', 'H2', 'H3', 'DSR')
-ORDER BY {DATE_COL}
-""",
-        language="sql",
-    )
+    st.sidebar.code(build_query_sql(query_year), language="sql")
 
 
 # =========================================================
@@ -345,7 +376,9 @@ st.subheader("데이터 조회")
 if "acdt_df" not in st.session_state:
     st.session_state["acdt_df"] = None
 
-if st.button("🔍 전체 연도 데이터 조회", type="primary"):
+query_label = "전체 연도 데이터 조회" if query_year is None else f"{query_year}년 데이터 조회"
+
+if st.button(f"🔍 {query_label}", type="primary"):
     if not user_name:
         st.error("SSO ID를 입력하세요.")
         st.stop()
@@ -354,12 +387,22 @@ if st.button("🔍 전체 연도 데이터 조회", type="primary"):
         st.error("bigdataquery 토큰이 없습니다. 토큰 발급 후 다시 조회하세요.")
         st.stop()
 
-    with st.spinner("사고 데이터를 조회 중입니다..."):
+    with st.spinner("사고 데이터를 조회 중입니다... (오류 시 자동으로 최대 3회 재시도)"):
         try:
-            df = load_acdt_data(user_name)
+            df = load_acdt_data(user_name, query_year)
             st.session_state["acdt_df"] = df
         except Exception as e:
             st.error("데이터 조회 실패")
+
+            if "502" in str(e):
+                st.warning(
+                    "**502 오류**는 서버(게이트웨이) 쪽 일시 장애이거나, "
+                    "조회 결과가 너무 커서 시간 초과된 경우가 많습니다.\n\n"
+                    "1. 잠시 후 다시 조회 버튼을 눌러보세요 (자동 재시도 3회는 이미 수행됨)\n"
+                    "2. 사이드바에서 **조회 범위 → 특정 연도만**으로 바꿔서 "
+                    "연도별로 나눠 조회해보세요"
+                )
+
             st.exception(e)
             st.stop()
 

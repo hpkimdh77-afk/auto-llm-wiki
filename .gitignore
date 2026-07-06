@@ -25,3 +25,7 @@ yarn-error.log*
 
 # bkit internal state
 .bkit/
+
+# python
+__pycache__/
+*.pyc
